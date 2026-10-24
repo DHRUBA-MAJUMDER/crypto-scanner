@@ -1,0 +1,24 @@
+{
+  "builds": [
+    {
+      "src": "api/scan.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/scan",
+      "dest": "api/scan.py"
+    },
+    {
+      "src": "/",
+      "dest": "api/scan.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/scan",
+      "schedule": "*/2 * * * *"
+    }
+  ]
+}
