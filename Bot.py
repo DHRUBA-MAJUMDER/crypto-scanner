@@ -1225,19 +1225,29 @@ class EnterprisePositionManager:
             " CoinSwitch app mein position check karo."
         )
 
-      fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
+   fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
+      buffer_pct = 0.003 # 0.3% buffer for fakeouts
+
       if side_signal == "LONG":
-        stop_loss = format_price(actual_fill - sl_distance)
+        # SL below recent support
+        support_level = signal_data["support"]
+        stop_loss = format_price(support_level * (1 - buffer_pct))
+        # Failsafe: Agar support bahut paas hai, toh minimum 1x ATR door rakho
+        if (actual_fill - stop_loss) < atr:
+            stop_loss = format_price(actual_fill - atr)
+            
         real_risk = actual_fill - stop_loss
-        take_profit = format_price(
-            actual_fill + (2.0 * real_risk) + (2.0 * fee_buffer)
-        )
+        take_profit = format_price(actual_fill + (2.0 * real_risk) + (2.0 * fee_buffer))
       else:
-        stop_loss = format_price(actual_fill + sl_distance)
+        # SL above recent resistance
+        resistance_level = signal_data["resistance"]
+        stop_loss = format_price(resistance_level * (1 + buffer_pct))
+        # Failsafe: Agar resistance bahut paas hai, toh minimum 1x ATR door rakho
+        if (stop_loss - actual_fill) < atr:
+            stop_loss = format_price(actual_fill + atr)
+            
         real_risk = stop_loss - actual_fill
-        take_profit = format_price(
-            actual_fill - (2.0 * real_risk) - (2.0 * fee_buffer)
-        )
+        take_profit = format_price(actual_fill - (2.0 * real_risk) - (2.0 * fee_buffer))
 
       sl_order_id = self.place_exchange_trigger_order(
           symbol, close_side, quantity, stop_loss, "STOP_MARKET"
@@ -1304,7 +1314,7 @@ class EnterprisePositionManager:
         current_price = candles[-1]["close"]
       self._update_single_position(sym, current_price)
 
-  def _update_single_position(self, symbol: str, current_price: float):
+ def _update_single_position(self, symbol: str, current_price: float):
     with self.execution_lock:
       trade = self.active_trades.get(symbol)
       if not trade:
@@ -1312,27 +1322,68 @@ class EnterprisePositionManager:
 
       side = trade["side"]
       atr = trade["atr"]
+      entry_price = trade["entry_price"]
+      take_profit = trade["take_profit"]
       close_side = "SELL" if side == "LONG" else "BUY"
       min_trail_step = 0.25 * atr
+      
+      # Dynamically calculate 50% target distance
+      half_target = entry_price + (take_profit - entry_price) / 2.0
 
       if side == "LONG":
         if current_price > trade["highest_price"]:
           trade["highest_price"] = current_price
-          candidate_sl = format_price(current_price - (1.2 * atr))
-          if (candidate_sl - trade["stop_loss"]) >= min_trail_step:
-            self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
-            new_sl_id = self.place_exchange_trigger_order(
-                symbol, close_side, trade["quantity"], candidate_sl, "STOP_MARKET"
-            )
-            trade["stop_loss"] = candidate_sl
-            trade["sl_order_id"] = new_sl_id
-            db.save_position(trade)
+          
+          # SMART TRAIL: Trail ONLY if price crossed 50% of target
+          if current_price >= half_target:
+              candidate_sl = format_price(current_price - (1.2 * atr))
+              # Lock breakeven + minor profit instantly on crossing 50%
+              breakeven_sl = format_price(entry_price * 1.002)
+              candidate_sl = max(candidate_sl, breakeven_sl)
+              
+              if (candidate_sl - trade["stop_loss"]) >= min_trail_step:
+                self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
+                new_sl_id = self.place_exchange_trigger_order(
+                    symbol, close_side, trade["quantity"], candidate_sl, "STOP_MARKET"
+                )
+                trade["stop_loss"] = candidate_sl
+                trade["sl_order_id"] = new_sl_id
+                db.save_position(trade)
 
         if current_price >= trade["take_profit"]:
           self._close_position_locked(
               symbol, "🎯 Take Profit Hit!", current_price
           )
         elif current_price <= trade["stop_loss"]:
+          self._close_position_locked(
+              symbol, "🛑 Trailing SL Hit!", current_price
+          )
+
+      elif side == "SHORT":
+        if current_price < trade["lowest_price"]:
+          trade["lowest_price"] = current_price
+          
+          # SMART TRAIL: Trail ONLY if price crossed 50% of target
+          if current_price <= half_target:
+              candidate_sl = format_price(current_price + (1.2 * atr))
+              # Lock breakeven + minor profit instantly on crossing 50%
+              breakeven_sl = format_price(entry_price * 0.998)
+              candidate_sl = min(candidate_sl, breakeven_sl)
+              
+              if (trade["stop_loss"] - candidate_sl) >= min_trail_step:
+                self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
+                new_sl_id = self.place_exchange_trigger_order(
+                    symbol, close_side, trade["quantity"], candidate_sl, "STOP_MARKET"
+                )
+                trade["stop_loss"] = candidate_sl
+                trade["sl_order_id"] = new_sl_id
+                db.save_position(trade)
+
+        if current_price <= trade["take_profit"]:
+          self._close_position_locked(
+              symbol, "🎯 Take Profit Hit!", current_price
+          )
+        elif current_price >= trade["stop_loss"]:
           self._close_position_locked(
               symbol, "🛑 Trailing SL Hit!", current_price
           )
