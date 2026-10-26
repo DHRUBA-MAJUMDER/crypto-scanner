@@ -1049,16 +1049,28 @@ def parallel_scanner_loop():
             if api_guard.is_circuit_open():
                 time.sleep(30)
                 continue
+                
             watchlist = [c for c in get_compatible_watchlist() if c not in manager.active_trades]
+            
+            # 👇 Yahan print wapas add kiya hai taaki logs mein scan dikhe
+            print(f"🔍 [Scan] Checking {len(watchlist)} coins | Open Trades: {len(manager.active_trades)}", flush=True)
+            
             with ThreadPoolExecutor(max_workers=2) as executor:
                 future_to_coin = {executor.submit(analyze_closed_candle, coin): coin for coin in watchlist}
                 for future in as_completed(future_to_coin):
                     try:
                         setup = future.result()
                         if setup: manager.execute_entry(setup)
-                    except Exception: pass
+                    except Exception as e: 
+                        print(f"⚠️ Error in coin scan: {e}", flush=True)
+            
+            # 👇 Yahan scan ki report print hogi (taaki pata chale MACD kitne trades rok raha hai)
+            stats = pop_reject_stats()
+            print(f"📊 Scan summary (reject reasons): {stats}", flush=True)
+            
             time.sleep(SCAN_PAUSE_SEC)
         except Exception as e:
+            print(f"🚨 Scanner loop crashed: {e}", flush=True)
             time.sleep(15)
 
 if __name__ == "__main__":
