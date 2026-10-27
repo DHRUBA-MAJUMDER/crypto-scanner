@@ -1,7 +1,6 @@
 import logging
 import math
 import os
-import sqlite3
 import threading
 import time
 import uuid
@@ -84,8 +83,6 @@ RECONCILE_GRACE_SECONDS = 30
 MISSING_CONFIRMATIONS = 2
 MAX_API_FAILS_BEFORE_ALERT = 3
 
-DB_PATH = "bot_state.db"
-
 SUPPORTED_COINSWITCH_SYMBOLS = {
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT",
     "POLUSDT", "RENDERUSDT", "1000PEPEUSDT", "1000SHIBUSDT", "1000BONKUSDT", "1000FLOKIUSDT",
@@ -132,100 +129,67 @@ def safe_float(v, default=0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-# ==========================================
-# 2. PERSISTENT SQLITE DATABASE
-# ==========================================
-class StateDatabase:
-    def __init__(self, db_path=DB_PATH):
-        self.db_path = db_path
-        self.db_lock = threading.Lock()
-        self._init_db()
 
-    def _init_db(self):
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            c = conn.cursor()
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS active_positions (
-                    symbol TEXT PRIMARY KEY,
-                    side TEXT,
-                    entry_price REAL,
-                    quantity REAL,
-                    stop_loss REAL,
-                    take_profit REAL,
-                    highest_price REAL,
-                    lowest_price REAL,
-                    atr REAL,
-                    entry_order_id TEXT,
-                    sl_order_id TEXT,
-                    tp_order_id TEXT,
-                    candle_timestamp INTEGER,
-                    opened_at INTEGER
-                )
-            """)
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS trade_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT,
-                    side TEXT,
-                    entry_price REAL,
-                    exit_price REAL,
-                    quantity REAL,
-                    net_pnl_usdt REAL,
-                    reason TEXT,
-                    closed_date TEXT,
-                    closed_at INTEGER
-                )
-            """)
-            conn.commit()
+# ==========================================
+# 2. PERSISTENT FIREBASE DATABASE (Fixed for Render)
+# ==========================================
+FIREBASE_URL = "https://tradefix-939af-default-rtdb.firebaseio.com"
+
+class FirebaseDatabase:
+    def __init__(self):
+        self.db_lock = threading.Lock()
 
     def save_position(self, pos: dict):
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            c = conn.cursor()
-            c.execute(
-                """
-                INSERT OR REPLACE INTO active_positions VALUES (
-                    :symbol, :side, :entry_price, :quantity, :stop_loss, :take_profit,
-                    :highest_price, :lowest_price, :atr, :entry_order_id, :sl_order_id,
-                    :tp_order_id, :candle_timestamp, :opened_at
-                )
-                """,
-                pos,
-            )
-            conn.commit()
+        with self.db_lock:
+            try:
+                requests.put(f"{FIREBASE_URL}/active_positions/{pos['symbol']}.json", json=pos, timeout=5)
+            except Exception as e:
+                print(f"Firebase Save Error: {e}", flush=True)
 
     def delete_position(self, symbol: str):
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM active_positions WHERE symbol = ?", (symbol,))
-            conn.commit()
+        with self.db_lock:
+            try:
+                requests.delete(f"{FIREBASE_URL}/active_positions/{symbol}.json", timeout=5)
+            except Exception as e:
+                print(f"Firebase Delete Error: {e}", flush=True)
 
     def load_all_positions(self) -> dict:
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT * FROM active_positions").fetchall()
-            return {row["symbol"]: dict(row) for row in rows}
+        with self.db_lock:
+            try:
+                r = requests.get(f"{FIREBASE_URL}/active_positions.json", timeout=5)
+                if r.status_code == 200 and r.json():
+                    return r.json()
+            except Exception as e:
+                print(f"Firebase Load Error: {e}", flush=True)
+            return {}
 
     def record_closed_trade(self, symbol, side, entry_price, exit_price, qty, net_pnl, reason):
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO trade_history (symbol, side, entry_price, exit_price, quantity, net_pnl_usdt, reason, closed_date, closed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (symbol, side, entry_price, exit_price, qty, net_pnl, reason, today_str, int(time.time())),
-            )
-            conn.commit()
+        record = {
+            "symbol": symbol, "side": side, "entry_price": entry_price,
+            "exit_price": exit_price, "quantity": qty, "net_pnl_usdt": net_pnl,
+            "reason": reason, "closed_date": today_str, "closed_at": int(time.time())
+        }
+        with self.db_lock:
+            try:
+                requests.post(f"{FIREBASE_URL}/trade_history.json", json=record, timeout=5)
+            except Exception:
+                pass
 
     def get_today_realized_pnl(self) -> float:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        with self.db_lock, sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT SUM(net_pnl_usdt) FROM trade_history WHERE closed_date = ?",
-                (today_str,),
-            ).fetchone()
-            return float(row[0]) if row and row[0] is not None else 0.0
+        with self.db_lock:
+            try:
+                r = requests.get(f"{FIREBASE_URL}/trade_history.json", timeout=10)
+                if r.status_code == 200 and r.json():
+                    history = r.json()
+                    return sum(float(v.get("net_pnl_usdt", 0)) for v in history.values() if v.get("closed_date") == today_str)
+            except Exception:
+                pass
+        return 0.0
 
-db = StateDatabase()
+db = FirebaseDatabase()
+
 
 # ==========================================
 # 3. TELEGRAM ALERTS
@@ -413,7 +377,7 @@ def set_and_verify_leverage(symbol: str, leverage: int) -> bool:
 
 
 # ==========================================
-# 7. INDICATORS & SIGNAL (ADDED MACD)
+# 7. INDICATORS & SIGNAL (MACD)
 # ==========================================
 KLINE_INTERVAL_MIN = "15"
 CANDLE_MS = 15 * 60 * 1000
@@ -536,7 +500,6 @@ def calculate_atr(candles: list, period=14):
         atr = (atr * (period - 1) + tr) / period
     return atr if atr > 0 else None
 
-# NAYA INDICATOR: MACD for Safe Entry 
 def calculate_macd_current(closes: list):
     if not closes or len(closes) < 35:
         return None, None
@@ -642,7 +605,7 @@ def analyze_closed_candle(symbol: str):
         if not (RSI_LONG_MIN <= rsi <= RSI_LONG_MAX):
             reject("long_rsi")
             return None
-        if not (macd_val > macd_sig): # MACD Safe Entry Check
+        if not (macd_val > macd_sig):
             reject("long_macd_momentum_weak")
             return None
     else:
@@ -655,7 +618,7 @@ def analyze_closed_candle(symbol: str):
         if not (RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX):
             reject("short_rsi")
             return None
-        if not (macd_val < macd_sig): # MACD Safe Entry Check
+        if not (macd_val < macd_sig):
             reject("short_macd_momentum_weak")
             return None
 
@@ -970,11 +933,13 @@ class EnterprisePositionManager:
                         candidate_sl = max(candidate_sl, breakeven_sl)
                         
                         if (candidate_sl - trade["stop_loss"]) >= min_trail_step:
-                            self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
+                            # CRITICAL FIX: Pehle naya SL lagao, success ho tabhi purana cancel karo
                             new_sl_id = self.place_exchange_trigger_order(symbol, close_side, trade["quantity"], candidate_sl, "STOP_MARKET")
-                            trade["stop_loss"] = candidate_sl
-                            trade["sl_order_id"] = new_sl_id
-                            db.save_position(trade)
+                            if new_sl_id:
+                                self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
+                                trade["stop_loss"] = candidate_sl
+                                trade["sl_order_id"] = new_sl_id
+                                db.save_position(trade)
                             
                 if current_price >= trade["take_profit"]: self._close_position_locked(symbol, "🎯 TP Hit!", current_price)
                 elif current_price <= trade["stop_loss"]: self._close_position_locked(symbol, "🛑 SL Hit!", current_price)
@@ -988,11 +953,13 @@ class EnterprisePositionManager:
                         candidate_sl = min(candidate_sl, breakeven_sl)
                         
                         if (trade["stop_loss"] - candidate_sl) >= min_trail_step:
-                            self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
+                            # CRITICAL FIX: Pehle naya SL lagao, success ho tabhi purana cancel karo
                             new_sl_id = self.place_exchange_trigger_order(symbol, close_side, trade["quantity"], candidate_sl, "STOP_MARKET")
-                            trade["stop_loss"] = candidate_sl
-                            trade["sl_order_id"] = new_sl_id
-                            db.save_position(trade)
+                            if new_sl_id:
+                                self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
+                                trade["stop_loss"] = candidate_sl
+                                trade["sl_order_id"] = new_sl_id
+                                db.save_position(trade)
                             
                 if current_price <= trade["take_profit"]: self._close_position_locked(symbol, "🎯 TP Hit!", current_price)
                 elif current_price >= trade["stop_loss"]: self._close_position_locked(symbol, "🛑 SL Hit!", current_price)
@@ -1003,12 +970,19 @@ class EnterprisePositionManager:
         close_side = "SELL" if trade["side"] == "LONG" else "BUY"
         self.cancel_exchange_order(symbol, trade.get("sl_order_id", ""))
         self.cancel_exchange_order(symbol, trade.get("tp_order_id", ""))
+        
         close_payload = {
             "symbol": symbol, "exchange": EXCHANGE_NAME, "side": close_side,
             "type": "MARKET", "order_type": "MARKET", "quantity": trade["quantity"], "reduce_only": True,
         }
-        coinswitch_request("POST", "/trade/api/v2/futures/order", close_payload)
+        resp = coinswitch_request("POST", "/trade/api/v2/futures/order", close_payload)
         
+        # CRITICAL FIX: Agar exchange close order fail kar de, toh trade ko wapas list mein daalo taaki next loop mein retry ho sake
+        if not resp.get("ok"):
+            notify(f"⚠️ `{symbol}` close order failed (Exchange rejected or timeout). Retrying in next cycle.")
+            self.active_trades[symbol] = trade
+            return
+            
         entry = trade["entry_price"]
         qty = trade["quantity"]
         gross_pnl = (exit_price - entry) * qty if trade["side"] == "LONG" else (entry - exit_price) * qty
@@ -1042,7 +1016,7 @@ def position_monitor_loop():
 def parallel_scanner_loop():
     manager.reconcile_with_exchange()
     avail = get_futures_available_inr()
-    if avail is not None: notify("✅ *CoinSwitch Bot Live (MACD Safe Entry)!*")
+    if avail is not None: notify("✅ *CoinSwitch Bot Live (Firebase Connected)!*")
     
     while True:
         try:
@@ -1052,7 +1026,6 @@ def parallel_scanner_loop():
                 
             watchlist = [c for c in get_compatible_watchlist() if c not in manager.active_trades]
             
-            # 👇 Yahan print wapas add kiya hai taaki logs mein scan dikhe
             print(f"🔍 [Scan] Checking {len(watchlist)} coins | Open Trades: {len(manager.active_trades)}", flush=True)
             
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1064,9 +1037,8 @@ def parallel_scanner_loop():
                     except Exception as e: 
                         print(f"⚠️ Error in coin scan: {e}", flush=True)
             
-            # 👇 Yahan scan ki report print hogi (taaki pata chale MACD kitne trades rok raha hai)
             stats = pop_reject_stats()
-            print(f"📊 Scan summary (reject reasons): {stats}", flush=True)
+            print(f"📊 Scan summary: {stats}", flush=True)
             
             time.sleep(SCAN_PAUSE_SEC)
         except Exception as e:
