@@ -284,7 +284,7 @@ def verify_sufficient_balance() -> bool:
         for item in data.get("base_asset_balances", []):
             if str(item.get("base_asset", "")).upper() == "USDT":
                 usdt_bal = safe_float(item.get("balances", {}).get("total_available_balance"))
-                if usdt_bal >= 3.0:
+                if usdt_bal >= 2.3:
                     balance_state["avail"] = usdt_bal
                     return True
     
