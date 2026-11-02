@@ -65,7 +65,7 @@ MAX_CONSECUTIVE_ERRORS = 5
 
 # ---------- AI DYNAMIC SETTINGS ----------
 DYNAMIC_SETTINGS = {
-    "atr_buffer": 0.25 
+    "atr_buffer": 0.50 
 }
 
 # ---------- AGGRESSIVE SIGNAL SETTINGS ----------
@@ -284,7 +284,7 @@ def verify_sufficient_balance() -> bool:
         for item in data.get("base_asset_balances", []):
             if str(item.get("base_asset", "")).upper() == "USDT":
                 usdt_bal = safe_float(item.get("balances", {}).get("total_available_balance"))
-                if usdt_bal >= 2.3:
+                if usdt_bal >= 2.2:
                     balance_state["avail"] = usdt_bal
                     return True
     
@@ -643,7 +643,8 @@ class EnterprisePositionManager:
                     avg = safe_float(st["body"].get("data", {}).get("order", {}).get("avg_execution_price"))
                     if avg > 0: actual_fill = avg; break
 
-       fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
+            # NAYA SMART TARGET LOGIC (SUPPORT/RESISTANCE BASED)
+            fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
             
             tp_multiplier = 1.5
             stop_loss = format_price(base_sl)
@@ -670,6 +671,7 @@ class EnterprisePositionManager:
                 else:
                     final_tp = math_tp
                 take_profit = format_price(final_tp)
+
             def place_trigger(close_side, px, type_str):
                 r = coinswitch_request("POST", "/trade/api/v2/futures/order", {
                     "exchange": EXCHANGE_NAME, "symbol": symbol, "side": close_side,
@@ -694,7 +696,7 @@ class EnterprisePositionManager:
         emoji = "🟢 *LONG*" if side_signal == "LONG" else "🔴 *SHORT*"
         notify(
             f"{emoji} | Coin: `{symbol}`\nFill: `{actual_fill}` | Qty: `{quantity}`\n"
-            f"🛡️ Smart Stop Loss: `{stop_loss}`\n🎯 TP (95% Anti-Dump): `{take_profit}`\n"
+            f"🛡️ Smart Stop Loss: `{stop_loss}`\n🎯 TP (Smart Anti-Dump): `{take_profit}`\n"
             f"✅ Confirmation Candlestick Validated\n"
             f"📊 AI Volume Spike: `{vol_ratio}x`"
         )
