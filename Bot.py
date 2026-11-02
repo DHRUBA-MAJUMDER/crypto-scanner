@@ -70,7 +70,7 @@ DYNAMIC_SETTINGS = {
 
 # ---------- AGGRESSIVE SIGNAL SETTINGS ----------
 BREAKOUT_LOOKBACK = 12
-VOL_MULT = 0.70
+VOL_MULT = 1.0
 MIN_BODY_ATR = 0.15
 RSI_LONG_MIN, RSI_LONG_MAX = 50, 75
 RSI_SHORT_MIN, RSI_SHORT_MAX = 25, 50
@@ -643,16 +643,33 @@ class EnterprisePositionManager:
                     avg = safe_float(st["body"].get("data", {}).get("order", {}).get("avg_execution_price"))
                     if avg > 0: actual_fill = avg; break
 
-            fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
+       fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
             
-            tp_multiplier = 1.95 
-            if side_signal == "LONG":
-                stop_loss = format_price(base_sl)
-                take_profit = format_price(actual_fill + (tp_multiplier * (actual_fill - stop_loss)) + fee_buffer)
-            else:
-                stop_loss = format_price(base_sl)
-                take_profit = format_price(actual_fill - (tp_multiplier * (stop_loss - actual_fill)) - fee_buffer)
+            tp_multiplier = 1.5
+            stop_loss = format_price(base_sl)
+            
+            # Fetch Support and Resistance from Signal Data
+            support_level = signal_data.get("support", actual_fill)
+            resistance_level = signal_data.get("resistance", actual_fill)
 
+            if side_signal == "LONG":
+                math_tp = actual_fill + (tp_multiplier * (actual_fill - stop_loss)) + fee_buffer
+                # Agar maths wala TP pichle resistance ke bhi upar ja raha hai, toh thoda paas (smart) kar do
+                smart_tp = resistance_level - (atr * 0.15) 
+                if math_tp > resistance_level:
+                    final_tp = max(actual_fill + ((math_tp - actual_fill) * 0.5), smart_tp)
+                else:
+                    final_tp = math_tp
+                take_profit = format_price(final_tp)
+            else:
+                math_tp = actual_fill - (tp_multiplier * (stop_loss - actual_fill)) - fee_buffer
+                # Agar maths wala TP pichle support ke bhi neeche ja raha hai, toh usko support se thoda upar (smart) kar do
+                smart_tp = support_level + (atr * 0.15) 
+                if math_tp < support_level:
+                    final_tp = min(actual_fill - ((actual_fill - math_tp) * 0.5), smart_tp)
+                else:
+                    final_tp = math_tp
+                take_profit = format_price(final_tp)
             def place_trigger(close_side, px, type_str):
                 r = coinswitch_request("POST", "/trade/api/v2/futures/order", {
                     "exchange": EXCHANGE_NAME, "symbol": symbol, "side": close_side,
