@@ -102,7 +102,6 @@ SUPPORTED_COINSWITCH_SYMBOLS = {
 # ==========================================
 # 1b. INSTRUMENT PRECISION TABLE & HELPERS
 # ==========================================
-# Exact step_size (qty) and tick_size (price) per instrument with dynamic API override
 INSTRUMENT_SPECS = {
     "BTCUSDT": {"step": "0.001", "tick": "0.1"},
     "ETHUSDT": {"step": "0.001", "tick": "0.01"},
@@ -176,7 +175,6 @@ reject_stats = Counter()
 reject_lock = threading.Lock()
 bad_symbols = {}
 
-# Fail-safe daily P&L state
 local_daily_pnl = {"date": "", "pnl": 0.0, "synced": False}
 
 def reject(reason: str):
@@ -309,12 +307,15 @@ class FirebaseDatabase:
             local_daily_pnl["pnl"] += net_pnl
             try:
                 requests.post(f"{FIREBASE_URL}/trade_history.json", json=record, timeout=5)
-                requests.put(f"{FIREBASE_URL}/daily_pnl/{today_str}.json", json={"pnl": local_daily_pnl["pnl"], "updated_at": int(time.time())}, timeout=5)
+                requests.put(
+                    f"{FIREBASE_URL}/daily_pnl/{today_str}.json",
+                    json={"pnl": local_daily_pnl["pnl"], "updated_at": int(time.time())},
+                    timeout=5
+                )
             except Exception as e:
                 logger.error(f"Firebase Record Closed Trade Error: {e}")
 
     def get_today_realized_pnl(self):
-        """Returns (pnl_float, is_verified_bool) to enforce fail-closed daily loss protection."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         with self.db_lock:
             try:
@@ -441,7 +442,6 @@ def coinswitch_request(method: str, endpoint: str, payload: dict = None, track_e
         return {"ok": False, "status": 0, "error": str(e)}
 
 def load_exchange_precision():
-    """Attempts to dynamically refresh instrument tick_size and step_size from CoinSwitch."""
     resp = coinswitch_request("GET", f"/trade/api/v2/futures/instrument_info?exchange={EXCHANGE_NAME}", track_errors=False)
     if not resp.get("ok"):
         return
@@ -486,7 +486,6 @@ def set_and_verify_leverage(symbol: str, leverage: int) -> bool:
         logger.error(f"Leverage POST failed for {symbol}: {resp.get('error')}")
         return False
 
-    # Check if POST response body directly confirms leverage
     body_data = resp.get("body", {}).get("data", resp.get("body", {}))
     if isinstance(body_data, dict):
         post_lev = safe_float(_pick(body_data, "leverage", "max_leverage"))
@@ -494,7 +493,6 @@ def set_and_verify_leverage(symbol: str, leverage: int) -> bool:
             logger.error(f"Leverage mismatch in POST response for {symbol}: got {post_lev}, expected {leverage}")
             return False
 
-    # Readback verification via GET leverage endpoint
     get_resp = coinswitch_request(
         "GET",
         f"/trade/api/v2/futures/leverage?exchange={EXCHANGE_NAME}&symbol={symbol}",
@@ -513,7 +511,6 @@ def set_and_verify_leverage(symbol: str, leverage: int) -> bool:
     return True
 
 def extract_order_details(resp_body: dict) -> dict:
-    """Safely extracts order status, avg fill price, and executed qty across CoinSwitch schema variations."""
     if not isinstance(resp_body, dict):
         return {"status": "", "avg_price": 0.0, "exec_qty": 0.0, "order_id": ""}
     data = resp_body.get("data", resp_body)
@@ -848,7 +845,6 @@ class EnterprisePositionManager:
         return {"status": "", "avg_price": 0.0, "exec_qty": 0.0, "order_id": ""}
 
     def _place_trigger_order(self, symbol: str, close_side: str, trigger_px: float, order_type: str, quantity: float) -> str:
-        """Places SL/TP trigger order with exact quantity and fallback to 0 if exchange requires position-based trigger."""
         payload_qty = {
             "exchange": EXCHANGE_NAME,
             "symbol": symbol,
@@ -864,7 +860,6 @@ class EnterprisePositionManager:
             if det["order_id"]:
                 return det["order_id"]
 
-        # Fallback: retry with quantity=0 in case CoinSwitch requires 0 for position-level STOP_MARKET / TAKE_PROFIT_MARKET
         logger.warning(f"{order_type} with qty={quantity} rejected for {symbol} ({r.get('error')}). Retrying with qty=0.")
         payload_zero = dict(payload_qty, quantity=0)
         r2 = coinswitch_request("POST", "/trade/api/v2/futures/order", payload_zero)
@@ -876,10 +871,9 @@ class EnterprisePositionManager:
         logger.error(f"Trigger placement {order_type} failed completely for {symbol}: {r2.get('error')}")
         return ""
 
-   def reconcile_with_exchange(self):
+    def reconcile_with_exchange(self):
         snapshot_time = time.time()
 
-        # Fetch all open positions; abort immediately if API fails (never assume flat on error)
         pos_resp = coinswitch_request("GET", f"/trade/api/v2/futures/positions?exchange={EXCHANGE_NAME}", track_errors=False)
         if not pos_resp.get("ok"):
             logger.warning(f"Reconcile skipped: could not fetch positions ({pos_resp.get('error')})")
@@ -888,7 +882,7 @@ class EnterprisePositionManager:
         body = pos_resp.get("body", {})
         data = body.get("data", body) if isinstance(body, dict) else body
 
-        # ✅ FIX: Handle empty dict {}, None, or nested list formats from CoinSwitch when 0 trades are open
+        # Handle empty dict {}, None, or nested list formats from CoinSwitch when 0 trades are open
         if data is None or data == {}:
             pos_list = []
         elif isinstance(data, list):
@@ -923,7 +917,6 @@ class EnterprisePositionManager:
                     continue
 
                 if norm_key not in exchange_positions:
-                    # Double-check single-symbol endpoint before incrementing missing counter
                     single_resp = coinswitch_request(
                         "GET",
                         f"/trade/api/v2/futures/positions?exchange={EXCHANGE_NAME}&symbol={local_key}",
@@ -931,9 +924,11 @@ class EnterprisePositionManager:
                     )
                     if not single_resp.get("ok"):
                         continue
-                    s_data = single_resp.get("body", {}).get("data", [])
+                    s_body = single_resp.get("body", {})
+                    s_raw = s_body.get("data", s_body) if isinstance(s_body, dict) else s_body
+                    s_list = s_raw if isinstance(s_raw, list) else ([s_raw] if isinstance(s_raw, dict) and "symbol" in s_raw else [])
                     s_size = 0.0
-                    for p in (s_data if isinstance(s_data, list) else []):
+                    for p in s_list:
                         if isinstance(p, dict) and str(p.get("status", "OPEN")).upper() == "OPEN":
                             s_size += abs(safe_float(_pick(p, "position_size", "size", "quantity")))
 
@@ -1100,7 +1095,6 @@ class EnterprisePositionManager:
                 reject("missing_order_id")
                 return
 
-            # Strict Fill Verification (Requires confirmed execution price and quantity)
             actual_fill = 0.0
             filled_qty = 0.0
             FILLED_STATES = {"FILLED", "EXECUTED", "COMPLETED", "CLOSED"}
@@ -1120,7 +1114,6 @@ class EnterprisePositionManager:
                     self._safe_cancel(symbol, order_id)
                     break
 
-            # Fallback: check exchange position directly if order endpoint lagged
             if filled_qty <= 0 or actual_fill <= 0:
                 pos_check = coinswitch_request(
                     "GET",
@@ -1128,7 +1121,10 @@ class EnterprisePositionManager:
                     track_errors=False
                 )
                 if pos_check.get("ok"):
-                    for p in (pos_check.get("body", {}).get("data", []) or []):
+                    p_body = pos_check.get("body", {})
+                    p_raw = p_body.get("data", p_body) if isinstance(p_body, dict) else p_body
+                    p_list = p_raw if isinstance(p_raw, list) else ([p_raw] if isinstance(p_raw, dict) and "symbol" in p_raw else [])
+                    for p in p_list:
                         if isinstance(p, dict) and str(p.get("status", "OPEN")).upper() == "OPEN":
                             p_sz = abs(safe_float(_pick(p, "position_size", "size", "quantity")))
                             p_ep = safe_float(_pick(p, "entry_price", "avg_entry_price", "average_price"))
@@ -1278,8 +1274,11 @@ class EnterprisePositionManager:
             notify(f"🚨 Cannot verify whether `{symbol}` is closed. Retained in recovery state.")
             return
 
+        p_body = pos_resp.get("body", {})
+        p_raw = p_body.get("data", p_body) if isinstance(p_body, dict) else p_body
+        p_list = p_raw if isinstance(p_raw, list) else ([p_raw] if isinstance(p_raw, dict) and "symbol" in p_raw else [])
         size = 0.0
-        for p in (pos_resp.get("body", {}).get("data", []) or []):
+        for p in p_list:
             if isinstance(p, dict) and str(p.get("status", "OPEN")).upper() == "OPEN":
                 size += abs(safe_float(_pick(p, "position_size", "size", "quantity")))
 
