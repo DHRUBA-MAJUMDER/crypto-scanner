@@ -876,7 +876,7 @@ class EnterprisePositionManager:
         logger.error(f"Trigger placement {order_type} failed completely for {symbol}: {r2.get('error')}")
         return ""
 
-    def reconcile_with_exchange(self):
+   def reconcile_with_exchange(self):
         snapshot_time = time.time()
 
         # Fetch all open positions; abort immediately if API fails (never assume flat on error)
@@ -887,12 +887,25 @@ class EnterprisePositionManager:
 
         body = pos_resp.get("body", {})
         data = body.get("data", body) if isinstance(body, dict) else body
-        if not isinstance(data, list):
-            logger.warning("Reconcile skipped: unexpected positions payload format")
+
+        # ✅ FIX: Handle empty dict {}, None, or nested list formats from CoinSwitch when 0 trades are open
+        if data is None or data == {}:
+            pos_list = []
+        elif isinstance(data, list):
+            pos_list = data
+        elif isinstance(data, dict):
+            if "positions" in data and isinstance(data["positions"], list):
+                pos_list = data["positions"]
+            elif "symbol" in data:
+                pos_list = [data]
+            else:
+                pos_list = [v for v in data.values() if isinstance(v, dict)]
+        else:
+            logger.warning(f"Reconcile skipped: unexpected positions payload format ({type(data).__name__})")
             return
 
         exchange_positions = {}
-        for pos in data:
+        for pos in pos_list:
             if isinstance(pos, dict) and str(pos.get("status", "OPEN")).upper() == "OPEN":
                 sym = normalize_symbol(pos.get("symbol"))
                 sz = abs(safe_float(_pick(pos, "position_size", "size", "quantity")))
