@@ -53,19 +53,19 @@ BASE_URL = "https://coinswitch.co"
 EXCHANGE_NAME = "EXCHANGE_2"
 TIMEFRAME = "15m"
 
-# ✅ 6x Leverage and Dynamic Margin Limits
+# ✅ 6x Leverage and Dynamic Margin Limits (UPDATED FOR ₹3000 CAPITAL)
 LEVERAGE = 6
-MAX_MARGIN_PER_TRADE_USDT = 12.0
+MAX_MARGIN_PER_TRADE_USDT = 8.0     # 8 USDT Per Trade Limit
 MIN_INR_REQUIRED = 150.0
 ROUND_TRIP_FEE_PCT = 0.0012
-MAX_DAILY_LOSS_USDT = 4.0
+MAX_DAILY_LOSS_USDT = 4.0           # Daily loss cap at 4 USDT
 MAX_CONCURRENT_TRADES = 2
 MAX_SAME_DIRECTION_TRADES = 2
 MAX_CONSECUTIVE_ERRORS = 5
 
 # ---------- AI DYNAMIC SETTINGS ----------
 DYNAMIC_SETTINGS = {
-    "atr_buffer": 0.50 
+    "atr_buffer": 0.50              # Strictly Fixed at 0.50 to avoid Wicks/Fakeouts
 }
 
 # ---------- AGGRESSIVE SIGNAL SETTINGS ----------
@@ -408,7 +408,7 @@ def calculate_cmf(candles: list, period=20):
         mfm = ((close_px - l) - (h - close_px)) / (h - l)
         mfv_sum += mfm * v
         vol_sum += v
-    return mfv_sum / vol_sum if vol_sum > 0 else 0.0
+        return mfv_sum / vol_sum if vol_sum > 0 else 0.0
 
 def verify_historical_edge(candles: list, direction: str) -> bool:
     wins, losses = 0, 0
@@ -610,7 +610,6 @@ class EnterprisePositionManager:
             atr = signal_data["atr"]
             logical_sl = signal_data["logical_sl"]
             
-            # ✅ FIXED: Added proper Dynamic ATR Cushion to SL to survive Wick Traps/Stop Hunts!
             dynamic_cushion = atr * DYNAMIC_SETTINGS["atr_buffer"]
             if side_signal == "LONG":
                 base_sl = min(logical_sl - dynamic_cushion, ref_price - (0.5 * atr))
@@ -619,6 +618,37 @@ class EnterprisePositionManager:
                 
             sl_distance = abs(ref_price - base_sl)
             if sl_distance <= 0: sl_distance = 1.0 * atr
+
+            # 🚀 --- NEW PRE-TRADE ESTIMATION & FILTERS --- 🚀
+            # Before placing the order, bot checks if the trade is worth taking!
+            est_stop_loss = base_sl
+            fee_buffer_est = ref_price * ROUND_TRIP_FEE_PCT
+            tp_multiplier = 1.5
+            support_level = signal_data.get("support", ref_price)
+            resistance_level = signal_data.get("resistance", ref_price)
+
+            if side_signal == "LONG":
+                math_tp = ref_price + (tp_multiplier * (ref_price - est_stop_loss)) + fee_buffer_est
+                smart_tp = resistance_level - (atr * 0.15) 
+                final_tp = max(ref_price + ((math_tp - ref_price) * 0.5), smart_tp) if math_tp > resistance_level else math_tp
+            else:
+                math_tp = ref_price - (tp_multiplier * (est_stop_loss - ref_price)) - fee_buffer_est
+                smart_tp = support_level + (atr * 0.15) 
+                final_tp = min(ref_price - ((ref_price - math_tp) * 0.5), smart_tp) if math_tp < support_level else math_tp
+
+            risk_amount = abs(ref_price - est_stop_loss)
+            reward_amount = abs(final_tp - ref_price)
+
+            # ❌ 1. STRICT R:R FILTER (Rejects Loss > Profit setups like UNI and AAVE)
+            if reward_amount < risk_amount:
+                reject("Bad_RR_Trap_Filter")
+                return
+
+            # ❌ 2. COMMISSION TRAP FILTER (Target must be at least 0.8% away)
+            if (reward_amount / ref_price) < 0.008:
+                reject("Target_Too_Small_Fee_Trap")
+                return
+            # -----------------------------------------------
 
             quantity = calculate_risk_based_quantity(ref_price, sl_distance, vol_ratio)
             if quantity <= 0: return
@@ -643,19 +673,12 @@ class EnterprisePositionManager:
                     avg = safe_float(st["body"].get("data", {}).get("order", {}).get("avg_execution_price"))
                     if avg > 0: actual_fill = avg; break
 
-            # NAYA SMART TARGET LOGIC (SUPPORT/RESISTANCE BASED)
+            # Recalculate precisely using actual fill price to place triggers
             fee_buffer = actual_fill * ROUND_TRIP_FEE_PCT
-            
-            tp_multiplier = 1.5
             stop_loss = format_price(base_sl)
             
-            # Fetch Support and Resistance from Signal Data
-            support_level = signal_data.get("support", actual_fill)
-            resistance_level = signal_data.get("resistance", actual_fill)
-
             if side_signal == "LONG":
                 math_tp = actual_fill + (tp_multiplier * (actual_fill - stop_loss)) + fee_buffer
-                # Agar maths wala TP pichle resistance ke bhi upar ja raha hai, toh thoda paas (smart) kar do
                 smart_tp = resistance_level - (atr * 0.15) 
                 if math_tp > resistance_level:
                     final_tp = max(actual_fill + ((math_tp - actual_fill) * 0.5), smart_tp)
@@ -664,7 +687,6 @@ class EnterprisePositionManager:
                 take_profit = format_price(final_tp)
             else:
                 math_tp = actual_fill - (tp_multiplier * (stop_loss - actual_fill)) - fee_buffer
-                # Agar maths wala TP pichle support ke bhi neeche ja raha hai, toh usko support se thoda upar (smart) kar do
                 smart_tp = support_level + (atr * 0.15) 
                 if math_tp < support_level:
                     final_tp = min(actual_fill - ((actual_fill - math_tp) * 0.5), smart_tp)
@@ -804,24 +826,10 @@ manager = EnterprisePositionManager()
 # 10. AI SELF-LEARNING & WORKER THREADS
 # ==========================================
 def self_learning_loop():
-    time.sleep(60) 
+    # ❌ FIX: AI Self-Learning tightening ATR buffer bug is now DISABLED!
+    # DYNAMIC_SETTINGS["atr_buffer"] will stay rigidly at 0.50 so fakeouts don't hit your SL.
     while True:
-        try:
-            trades = db.get_recent_trades(30)
-            if len(trades) >= 10:
-                wins = len([t for t in trades if safe_float(t.get('net_pnl_usdt')) > 0])
-                win_rate = wins / len(trades)
-                
-                current_buf = DYNAMIC_SETTINGS["atr_buffer"]
-                if win_rate < 0.40 and current_buf < 0.60:
-                    DYNAMIC_SETTINGS["atr_buffer"] += 0.05
-                    notify(f"🧠 *AI Self-Learning:* Win-rate low ({win_rate:.0%}). Increasing ATR Buffer to {DYNAMIC_SETTINGS['atr_buffer']:.2f} to avoid fakeouts.")
-                elif win_rate > 0.60 and current_buf > 0.15:
-                    DYNAMIC_SETTINGS["atr_buffer"] -= 0.05
-                    notify(f"🧠 *AI Self-Learning:* Market favorable ({win_rate:.0%}). Tightening ATR Buffer to {DYNAMIC_SETTINGS['atr_buffer']:.2f}.")
-        except Exception as e:
-            logger.error(f"AI Learning error: {e}")
-        time.sleep(3600 * 6)
+        time.sleep(3600)
 
 def position_monitor_loop():
     reconcile_counter = 0
@@ -837,7 +845,7 @@ def position_monitor_loop():
 
 def parallel_scanner_loop():
     manager.reconcile_with_exchange()
-    if verify_sufficient_balance(): notify("✅ *CoinSwitch Bot Live (Anti-Whale Dump + Dynamic SL Buffer Active)!*")
+    if verify_sufficient_balance(): notify("✅ *CoinSwitch Bot Live (Strict R:R + 8 USDT Margin Active)!*")
     
     while True:
         try:
