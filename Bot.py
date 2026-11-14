@@ -853,6 +853,7 @@ class EnterprisePositionManager:
             "symbol": symbol,
             "side": close_side,
             "type": order_type,
+            "order_type": order_type,
             "quantity": quantity,
             "trigger_price": trigger_px,
             "reduce_only": True
@@ -1087,12 +1088,14 @@ class EnterprisePositionManager:
                 "exchange": EXCHANGE_NAME,
                 "side": "BUY" if side_signal == "LONG" else "SELL",
                 "type": "MARKET",
+                "order_type": "MARKET",
                 "quantity": req_quantity,
                 "client_order_id": client_oid,
             }
 
             resp = coinswitch_request("POST", "/trade/api/v2/futures/order", entry_payload)
             if not resp.get("ok"):
+                logger.error(f"🚨 ENTRY FAILED FOR {symbol}. Reason: {resp.get('error')}")
                 reject("order_post_failed")
                 return
 
@@ -1267,6 +1270,7 @@ class EnterprisePositionManager:
             "exchange": EXCHANGE_NAME,
             "side": close_side,
             "type": "MARKET",
+            "order_type": "MARKET",
             "quantity": qty,
             "reduce_only": True,
         })
@@ -1352,7 +1356,7 @@ def parallel_scanner_loop():
 
     if LIVE_TRADING_ENABLED:
         if verify_sufficient_balance():
-            notify("✅ *CoinSwitch Bot Started in LIVE mode (8 USDT Margin | 6x | R:R Wall Bug Fixed).*")
+            notify("✅ *CoinSwitch Bot Started in LIVE mode (8 USDT Margin | 6x | Order Fix Active).*")
         else:
             notify("⛔ LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
     else:
