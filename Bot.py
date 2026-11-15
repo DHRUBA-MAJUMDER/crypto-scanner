@@ -74,7 +74,8 @@ DYNAMIC_SETTINGS = {
 }
 
 BREAKOUT_LOOKBACK = 12
-VOL_MULT = 1.0
+# ✅ NOTE: Volume filter slightly relaxed to 0.80 as requested in your note for more trades
+VOL_MULT = 0.80  
 RSI_LONG_MIN, RSI_LONG_MAX = 50, 75
 RSI_SHORT_MIN, RSI_SHORT_MAX = 25, 50
 EDGE_MIN_WINRATE = 0.40
@@ -788,7 +789,6 @@ def analyze_closed_candle(symbol: str):
     vol_ratio = c2_confirm["volume"] / avg_vol if avg_vol > 0 else 1.0
     logical_sl = c1_breakout["low"] if direction == "LONG" else c1_breakout["high"]
 
-    # FIX: Use 70-candle macro highs/lows for Smart TP wall detection so broken 12-candle levels don't choke TP
     major_support = min(c["low"] for c in closed_candles[:-2])
     major_resistance = max(c["high"] for c in closed_candles[:-2])
 
@@ -1033,7 +1033,6 @@ class EnterprisePositionManager:
             support_level = signal_data.get("support", ref_price)
             resistance_level = signal_data.get("resistance", ref_price)
 
-            # FIX: Clean Smart TP calculation without halving reward
             if side_signal == "LONG":
                 math_tp = ref_price + (tp_multiplier * (ref_price - est_stop_loss)) + fee_buffer_est
                 if resistance_level > (ref_price + (atr * 0.3)) and math_tp > resistance_level:
@@ -1051,11 +1050,9 @@ class EnterprisePositionManager:
             risk_amount = abs(ref_price - est_stop_loss)
             reward_amount = abs(est_take_profit - ref_price)
 
-            # 1. STRICT R:R FILTER (Allow slight rounding tolerance of 0.95x)
             if reward_amount < (risk_amount * 0.95):
                 reject("Bad_RR_Trap_Filter")
                 return
-            # 2. COMMISSION TRAP FILTER (Min 0.75% Target Move)
             if (reward_amount / ref_price) < 0.0075:
                 reject("Target_Too_Small_Fee_Trap")
                 return
@@ -1356,7 +1353,7 @@ def parallel_scanner_loop():
 
     if LIVE_TRADING_ENABLED:
         if verify_sufficient_balance():
-            notify("✅ *CoinSwitch Bot Started in LIVE mode (8 USDT Margin | 6x | Order Fix Active).*")
+            notify("✅ *CoinSwitch Bot Started in LIVE mode (Volume 0.80 Relaxed + 30s Scan Speed).*")
         else:
             notify("⛔ LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
     else:
@@ -1384,7 +1381,8 @@ def parallel_scanner_loop():
                         logger.error(f"Signal exception: {traceback.format_exc()}")
 
             print(f"📊 Scan summary: {pop_reject_stats()}", flush=True)
-            time.sleep(90)
+            # ✅ NOTE: Reduced scan sleep time from 90s to 30s as requested in your notebook point #2
+            time.sleep(30)
         except Exception as e:
             print(f"🚨 Scanner crash: {e}", flush=True)
             time.sleep(15)
