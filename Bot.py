@@ -75,7 +75,7 @@ DYNAMIC_SETTINGS = {
 
 BREAKOUT_LOOKBACK = 12
 
-# ✅ VOLUME FILTER REDUCED TO 40% (For more frequent trade entries)
+# â VOLUME FILTER REDUCED TO 40% (For more frequent trade entries)
 VOL_MULT = 0.40  
 
 RSI_LONG_MIN, RSI_LONG_MAX = 50, 75
@@ -391,7 +391,9 @@ class APIGuard:
             self.consecutive_errors += 1
             if self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS and time.time() > self.circuit_tripped_until:
                 self.circuit_tripped_until = time.time() + 900
-                notify(f"🚨 *CIRCUIT BREAKER TRIPPED!*\nLast error: `{err_detail[:120]}`\nPaused for 15 mins.")
+                notify(f"ð¨ *CIRCUIT BREAKER TRIPPED!*
+Last error: `{err_detail[:120]}`
+Paused for 15 mins.")
 
     def is_circuit_open(self) -> bool:
         return time.time() < self.circuit_tripped_until
@@ -827,11 +829,11 @@ class EnterprisePositionManager:
 
                 FILLED_STATES = {"FILLED", "EXECUTED", "COMPLETED", "CLOSED"}
                 if sl_info["status"] in FILLED_STATES or sl_info["avg_price"] > 0:
-                    reason, exit_price = "🛑 SL Hit (Exchange)", sl_info["avg_price"] if sl_info["avg_price"] > 0 else safe_float(trade.get("stop_loss"))
+                    reason, exit_price = "ð SL Hit (Exchange)", sl_info["avg_price"] if sl_info["avg_price"] > 0 else safe_float(trade.get("stop_loss"))
                 elif tp_info["status"] in FILLED_STATES or tp_info["avg_price"] > 0:
-                    reason, exit_price = "🎯 TP Hit (Exchange)", tp_info["avg_price"] if tp_info["avg_price"] > 0 else safe_float(trade.get("take_profit"))
+                    reason, exit_price = "ð¯ TP Hit (Exchange)", tp_info["avg_price"] if tp_info["avg_price"] > 0 else safe_float(trade.get("take_profit"))
                 else:
-                    reason, exit_price = "🎯 Checked & Closed", safe_float(trade.get("entry_price"))
+                    reason, exit_price = "ð¯ Checked & Closed", safe_float(trade.get("entry_price"))
 
                 entry, qty = safe_float(trade.get("entry_price", 0)), safe_float(trade.get("quantity", 0))
                 gross_pnl = (exit_price - entry) * qty if trade["side"] == "LONG" else (entry - exit_price) * qty
@@ -840,15 +842,20 @@ class EnterprisePositionManager:
                 db.delete_position(sym)
                 db.record_closed_trade(sym, trade.get("side", "LONG"), entry, exit_price, qty, net_pnl, reason)
                 notify(
-                    f"🔔 *Position Closed: {reason}*\nCoin: `{sym}`\n"
-                    f"Entry: `{entry}` | Exit: `{exit_price}`\n"
-                    f"💵 Net PnL: `{net_pnl:+.2f} USDT`\n"
-                    f"📅 Today: `{round(db.get_today_realized_pnl()[0], 2):+.2f} USDT`"
+                    f"ð *Position Closed: {reason}*
+Coin: `{sym}`
+"
+                    f"Entry: `{entry}` | Exit: `{exit_price}`
+"
+                    f"ðµ Net PnL: `{net_pnl:+.2f} USDT`
+"
+                    f"ð Today: `{round(db.get_today_realized_pnl()[0], 2):+.2f} USDT`"
                 )
 
             for orphan_sym, orphan_sz in exchange_positions.items():
                 if int(snapshot_time) % 300 < 25:
-                    notify(f"⚠️ *ORPHAN POSITION DETECTED*\nExchange has `{orphan_sym}` open (Size: `{orphan_sz}`). Check CoinSwitch!")
+                    notify(f"â ï¸ *ORPHAN POSITION DETECTED*
+Exchange has `{orphan_sym}` open (Size: `{orphan_sz}`). Check CoinSwitch!")
 
     def execute_entry(self, signal_data: dict):
         symbol, side_signal, candle_ts, vol_ratio = signal_data["symbol"], signal_data["signal"], signal_data["candle_ts"], signal_data["vol_ratio"]
@@ -876,7 +883,7 @@ class EnterprisePositionManager:
             est_stop_loss = format_price(base_sl, symbol)
             fee_buffer_est = ref_price * ROUND_TRIP_FEE_PCT
             
-            # ✅ TARGET 1:1 RATIO (For Ultra-Fast Profit Booking)
+            # â TARGET 1:1 RATIO (For Ultra-Fast Profit Booking)
             tp_multiplier = 1.0 
 
             if side_signal == "LONG":
@@ -889,8 +896,10 @@ class EnterprisePositionManager:
             if not LIVE_TRADING_ENABLED:
                 self.processed_candles[symbol] = candle_ts
                 notify(
-                    f"🧪 *DRY RUN SIGNAL* | `{symbol}` ({side_signal})\n"
-                    f"Ref Price: `{ref_price}` | SL: `{est_stop_loss}` | TP: `{est_take_profit}`\n"
+                    f"ð§ª *DRY RUN SIGNAL* | `{symbol}` ({side_signal})
+"
+                    f"Ref Price: `{ref_price}` | SL: `{est_stop_loss}` | TP: `{est_take_profit}`
+"
                     f"Hack: SCALPER TRAP FADE (1:1 Target, Vol 0.40x)"
                 )
                 return
@@ -905,11 +914,15 @@ class EnterprisePositionManager:
                 return
 
             client_oid = str(uuid.uuid4())
+            
+            # â FIX 1: MARKET to LIMIT order for Maker Fees and avoiding partial fill splits
             entry_payload = {
                 "symbol": symbol, "exchange": EXCHANGE_NAME,
                 "side": "BUY" if side_signal == "LONG" else "SELL",
-                "type": "MARKET", "order_type": "MARKET",
+                "type": "LIMIT", "order_type": "LIMIT",
+                "price": format_price(ref_price, symbol),
                 "quantity": req_quantity, "client_order_id": client_oid,
+                "time_in_force": "GTC"
             }
 
             resp = coinswitch_request("POST", "/trade/api/v2/futures/order", entry_payload)
@@ -921,13 +934,11 @@ class EnterprisePositionManager:
             if not order_id:
                 return
 
-            # ✅ ORPHAN FIX: 2.5 second sleep for sync safety
-            time.sleep(2.5)
-
+            # â FIX 2: Increased validation loop to 10 seconds to handle limit fills and network delay
             actual_fill, filled_qty = 0.0, 0.0
             FILLED_STATES = {"FILLED", "EXECUTED", "COMPLETED", "CLOSED"}
 
-            for _ in range(4):
+            for _ in range(10):
                 info = self._get_order_info(order_id)
                 if info["avg_price"] > 0: actual_fill = info["avg_price"]
                 if info["exec_qty"] > 0: filled_qty = info["exec_qty"]
@@ -958,10 +969,15 @@ class EnterprisePositionManager:
             db.save_position(pos_record)
 
         notify(
-            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (SCALPER TRAP 1:1 RR)\n"
-            f"Coin: `{symbol}`\nFill: `{actual_fill}` | Qty: `{quantity}`\n"
-            f"🛡️ SL: `{stop_loss}`\n🎯 TP: `{take_profit}`\n"
-            f"Fast 1:1 exit target set."
+            f"{'ð¢ *LONG*' if side_signal == 'LONG' else 'ð´ *SHORT*'} (LIMIT SCALPER)
+"
+            f"Coin: `{symbol}`
+Fill: `{actual_fill}` | Qty: `{quantity}`
+"
+            f"ð¡ï¸ SL: `{stop_loss}`
+ð¯ TP: `{take_profit}`
+"
+            f"Limit order executed to save fees."
         )
 
     def monitor_and_trail_positions(self):
@@ -994,9 +1010,9 @@ class EnterprisePositionManager:
                             trade["stop_loss"], trade["sl_order_id"] = candidate_sl, new_id
                             db.save_position(trade)
                 if current_price >= trade["take_profit"]:
-                    self._close_position_locked(symbol, "🎯 TP Hit (Trailing)!", current_price, qty, side)
+                    self._close_position_locked(symbol, "ð¯ TP Hit (Trailing)!", current_price, qty, side)
                 elif current_price <= trade["stop_loss"]:
-                    self._close_position_locked(symbol, "🛑 SL Hit (Trailing)!", current_price, qty, side)
+                    self._close_position_locked(symbol, "ð SL Hit (Trailing)!", current_price, qty, side)
             elif side == "SHORT":
                 trade["lowest_price"] = min(trade["lowest_price"], current_price)
                 if current_price <= trail_threshold:
@@ -1008,9 +1024,9 @@ class EnterprisePositionManager:
                             trade["stop_loss"], trade["sl_order_id"] = candidate_sl, new_id
                             db.save_position(trade)
                 if current_price <= trade["take_profit"]:
-                    self._close_position_locked(symbol, "🎯 TP Hit (Trailing)!", current_price, qty, side)
+                    self._close_position_locked(symbol, "ð¯ TP Hit (Trailing)!", current_price, qty, side)
                 elif current_price >= trade["stop_loss"]:
-                    self._close_position_locked(symbol, "🛑 SL Hit (Trailing)!", current_price, qty, side)
+                    self._close_position_locked(symbol, "ð SL Hit (Trailing)!", current_price, qty, side)
 
     def _close_position_locked(self, symbol: str, reason: str, exit_price: float, quantity: float, side: str):
         trade = self.active_trades.pop(symbol, None)
@@ -1042,7 +1058,7 @@ class EnterprisePositionManager:
             if trade:
                 self.active_trades[symbol] = trade
             if self.anti_spam_counts[symbol] <= 2:
-                notify(f"⚠️ `{symbol}` open after close request (Size={size}). Retrying.")
+                notify(f"â ï¸ `{symbol}` open after close request (Size={size}). Retrying.")
             return
 
         self.anti_spam_counts.pop(symbol, None)
@@ -1053,9 +1069,12 @@ class EnterprisePositionManager:
         db.record_closed_trade(symbol, t_side, entry, exit_price, qty, net_pnl, reason)
 
         notify(
-            f"🔔 *Position Closed: {reason}*\nCoin: `{symbol}`\n"
-            f"Entry: `{entry}` | Exit: `{exit_price}`\n"
-            f"💵 Net PnL: `{net_pnl:+.2f} USDT`"
+            f"ð *Position Closed: {reason}*
+Coin: `{symbol}`
+"
+            f"Entry: `{entry}` | Exit: `{exit_price}`
+"
+            f"ðµ Net PnL: `{net_pnl:+.2f} USDT`"
         )
 
 manager = EnterprisePositionManager()
@@ -1088,11 +1107,11 @@ def parallel_scanner_loop():
 
     if LIVE_TRADING_ENABLED:
         if verify_sufficient_balance():
-            notify("✅ *Bot Started: SCALPER TRAP FADE | Scan: 45s | Target: 1:1 | Vol: 0.40*")
+            notify("â *Bot Started: SCALPER TRAP FADE (LIMIT ORDERS) | Scan: 45s | Target: 1:1 | Vol: 0.40*")
         else:
-            notify("⛔ LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
+            notify("â LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
     else:
-        notify("🧪 *Signal-only DRY RUN started.* Set LIVE_TRADING_ENABLED=true for live orders.")
+        notify("ð§ª *Signal-only DRY RUN started.* Set LIVE_TRADING_ENABLED=true for live orders.")
 
     while True:
         try:
@@ -1101,7 +1120,7 @@ def parallel_scanner_loop():
                 continue
 
             watchlist = [s for s in sorted(SUPPORTED_COINSWITCH_SYMBOLS) if bad_symbols.get(s, 0) < 5 and s not in manager.active_trades]
-            print(f"🔍 [Scan] Checking {len(watchlist)} coins | Open Trades: {len(manager.active_trades)}", flush=True)
+            print(f"ð [Scan] Checking {len(watchlist)} coins | Open Trades: {len(manager.active_trades)}", flush=True)
 
             with ThreadPoolExecutor(max_workers=2) as executor:
                 for future in as_completed({executor.submit(analyze_closed_candle, coin): coin for coin in watchlist}):
@@ -1112,7 +1131,7 @@ def parallel_scanner_loop():
                     except Exception:
                         pass
 
-            print(f"📊 Scan summary: {pop_reject_stats()}", flush=True)
+            print(f"ð Scan summary: {pop_reject_stats()}", flush=True)
             time.sleep(45) 
         except Exception:
             time.sleep(15)
