@@ -74,7 +74,7 @@ DYNAMIC_SETTINGS = {
 }
 
 BREAKOUT_LOOKBACK = 12
-VOL_MULT = 0.80  # Relaxed as per notes[span_1](start_span)[span_1](end_span)
+VOL_MULT = 0.80  
 RSI_LONG_MIN, RSI_LONG_MAX = 50, 75
 RSI_SHORT_MIN, RSI_SHORT_MAX = 25, 50
 REQUIRE_EMA_TREND = True
@@ -551,6 +551,33 @@ def get_all_prices() -> dict:
             prices[normalize_symbol(sym)] = px
     return prices
 
+def calculate_ema(prices: list, period: int):
+    if not prices or len(prices) < period:
+        return None
+    sma = sum(prices[:period]) / period
+    multiplier = 2.0 / (period + 1.0)
+    ema = sma
+    for p in prices[period:]:
+        ema = (p - ema) * multiplier + ema
+    return ema
+
+def calculate_rsi(closes: list, period=14):
+    if not closes or len(closes) <= period:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    return 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)))
+
 def calculate_atr(candles: list, period=14):
     if not candles or len(candles) <= period:
         return None
@@ -563,19 +590,45 @@ def calculate_atr(candles: list, period=14):
         atr = (atr * (period - 1) + tr) / period
     return atr if atr > 0 else None
 
+def calculate_macd_current(closes: list):
+    if not closes or len(closes) < 35:
+        return None, None
+    def get_ema_series(data, p):
+        res = [sum(data[:p]) / p]
+        mult = 2.0 / (p + 1.0)
+        for val in data[p:]:
+            res.append((val - res[-1]) * mult + res[-1])
+        return res
+    ema12, ema26 = get_ema_series(closes, 12), get_ema_series(closes, 26)
+    macd_series = [ema12[i + (len(ema12) - len(ema26))] - ema26[i] for i in range(len(ema26))]
+    signal_series = get_ema_series(macd_series, 9)
+    return macd_series[-1], signal_series[-1]
+
+def calculate_cmf(candles: list, period=20):
+    if not candles or len(candles) < period:
+        return None
+    mfv_sum, vol_sum = 0.0, 0.0
+    for c in candles[-period:]:
+        h, l, close_px, v = c["high"], c["low"], c["close"], c["volume"]
+        if h == l:
+            continue
+        mfm = ((close_px - l) - (h - close_px)) / (h - l)
+        mfv_sum += mfm * v
+        vol_sum += v
+    return mfv_sum / vol_sum if vol_sum > 0 else 0.0
+
 # ==========================================
-# 7. AI "NO CONFIRMATION + REVERSE" LOGIC
+# 7. AI "INSTITUTIONAL TRAP / REVERSE" LOGIC
 # ==========================================
 def analyze_closed_candle(symbol: str):
     candles = fetch_klines(symbol, 110)
     now_ms = int(time.time() * 1000)
     
-    # We only look at fully closed candles. No C2 confirmation wait anymore.
     closed_candles = [c for c in candles if c["ts"] + CANDLE_MS <= now_ms]
     if len(closed_candles) < 72:
         return None
 
-    # 'c1_breakout' is now our only signal candle (the most recently closed one)
+    # We evaluate immediately on the closed breakout candle
     c1_breakout = closed_candles[-1]
 
     age_sec = (now_ms - (c1_breakout["ts"] + CANDLE_MS)) / 1000.0
@@ -583,10 +636,18 @@ def analyze_closed_candle(symbol: str):
         return None
 
     prev_closed = closed_candles[-(BREAKOUT_LOOKBACK + 1):-1]
+    closes = [c["close"] for c in closed_candles]
     volumes = [c["volume"] for c in closed_candles]
-    atr = calculate_atr(closed_candles, 14)
 
-    if not atr or atr <= 0:
+    # Calculate indicators
+    ema20 = calculate_ema(closes, 20)
+    ema50 = calculate_ema(closes, 50)
+    rsi = calculate_rsi(closes, 14)
+    atr = calculate_atr(closed_candles, 14)
+    macd_val, macd_sig = calculate_macd_current(closes)
+    cmf = calculate_cmf(closed_candles, 20)
+
+    if None in (ema20, ema50, rsi, atr, macd_val, cmf) or atr <= 0:
         return None
 
     support = min(c["low"] for c in prev_closed)
@@ -599,42 +660,63 @@ def analyze_closed_candle(symbol: str):
         reject("c1_low_volume")
         return None
 
-    # Step 1: Detect True Direction
-    initial_direction = None
+    # 1. First, detect what the APPARENT market direction is showing to Retail Traders
+    apparent_direction = None
     if c1_breakout["close"] > c1_breakout["open"] and c1_breakout["close"] > resistance + breakout_buffer:
-        initial_direction = "LONG"
+        apparent_direction = "LONG"
     elif c1_breakout["close"] < c1_breakout["open"] and c1_breakout["close"] < support - breakout_buffer:
-        initial_direction = "SHORT"
+        apparent_direction = "SHORT"
 
-    if not initial_direction:
+    if not apparent_direction:
         reject("no_breakout_c1")
         return None
 
-    # Step 2: HACK - Reverse the direction instantly (No wait for C2)[span_2](start_span)[span_2](end_span)
-    final_direction = "SHORT" if initial_direction == "LONG" else "LONG"
-    
+    # 2. Check if all traditional indicators are supporting the trap
+    if apparent_direction == "LONG":
+        if REQUIRE_EMA_TREND and not (ema20 > ema50):
+            reject("long_ema_trend")
+            return None
+        if not (RSI_LONG_MIN <= rsi <= RSI_LONG_MAX):
+            reject("long_rsi")
+            return None
+        if not (macd_val > macd_sig):
+            reject("long_macd_momentum_weak")
+            return None
+        if cmf < 0.10:
+            reject("cmf_long_weak")
+            return None
+    else:  # apparent_direction == "SHORT"
+        if REQUIRE_EMA_TREND and not (ema20 < ema50):
+            reject("short_ema_trend")
+            return None
+        if not (RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX):
+            reject("short_rsi")
+            return None
+        if not (macd_val < macd_sig):
+            reject("short_macd_momentum_weak")
+            return None
+        if cmf > -0.10:
+            reject("cmf_short_weak")
+            return None
+
+    # 3. HACK - All indicators confirm the trap. We execute the EXACT OPPOSITE!
     reject("SIGNAL_FOUND")
+    final_direction = "SHORT" if apparent_direction == "LONG" else "LONG"
 
     vol_ratio = c1_breakout["volume"] / avg_vol if avg_vol > 0 else 1.0
     
-    # SL is placed slightly beyond the fakeout extreme
+    # Place logical SL slightly beyond the fakeout extreme
     logical_sl = c1_breakout["high"] if final_direction == "SHORT" else c1_breakout["low"]
 
     major_support = min(c["low"] for c in closed_candles[:-1])
     major_resistance = max(c["high"] for c in closed_candles[:-1])
 
     return {
-        "symbol": symbol, 
-        "signal": final_direction, 
-        "signal_close": c1_breakout["close"],
-        "atr": atr, 
-        "support": major_support, 
-        "resistance": major_resistance,
+        "symbol": symbol, "signal": final_direction, "signal_close": c1_breakout["close"],
+        "atr": atr, "support": major_support, "resistance": major_resistance,
         "logical_sl": logical_sl,
-        "candle_ts": c1_breakout["ts"], 
-        "age_sec": int(age_sec), 
-        "vol_ratio": round(vol_ratio, 2),
-        "hack": True
+        "rsi": round(rsi, 2), "macd_val": round(macd_val, 5), "cmf": round(cmf, 3),
+        "candle_ts": c1_breakout["ts"], "age_sec": int(age_sec), "vol_ratio": round(vol_ratio, 2)
     }
 
 # ==========================================
@@ -826,7 +908,7 @@ class EnterprisePositionManager:
                 notify(
                     f"🧪 *DRY RUN SIGNAL* | `{symbol}` ({side_signal})\n"
                     f"Ref Price: `{ref_price}` | SL: `{est_stop_loss}` | TP: `{est_take_profit}`\n"
-                    f"Hack: REVERSE & NO CONFIRM WAIT"
+                    f"Hack: FULL INDICATOR TRAP FADE (No Confirm Wait)"
                 )
                 return
 
@@ -890,7 +972,7 @@ class EnterprisePositionManager:
             db.save_position(pos_record)
 
         notify(
-            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (REVERSE HACK)\n"
+            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (ALL-INDICATOR TRAP FADE)\n"
             f"Coin: `{symbol}`\nFill: `{actual_fill}` | Qty: `{quantity}`\n"
             f"🛡️ SL: `{stop_loss}`\n🎯 TP: `{take_profit}`\n"
             f"No Wait confirmation execution."
@@ -1021,7 +1103,7 @@ def parallel_scanner_loop():
 
     if LIVE_TRADING_ENABLED:
         if verify_sufficient_balance():
-            notify("✅ *Bot Started: FADING THE BREAKOUT (Reverse & No Confirm Wait) | Scan: 30s | Vol: 0.80*")
+            notify("✅ *Bot Started: FULL INDICATOR TRAP FADE (Reverse & No Confirm Wait) | Scan: 30s | Vol: 0.80*")
         else:
             notify("⛔ LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
     else:
@@ -1046,7 +1128,7 @@ def parallel_scanner_loop():
                         pass
 
             print(f"📊 Scan summary: {pop_reject_stats()}", flush=True)
-            time.sleep(30) # ✅ NOTE: Loop now set to 30 seconds[span_3](start_span)[span_3](end_span)
+            time.sleep(30) 
         except Exception:
             time.sleep(15)
 
