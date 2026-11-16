@@ -1,4 +1,3 @@
-
 import logging
 import math
 import os
@@ -76,8 +75,8 @@ DYNAMIC_SETTINGS = {
 
 BREAKOUT_LOOKBACK = 12
 
-# ✅ VOLUME FILTER REDUCED TO 40% (For more frequent trade entries)
-VOL_MULT = 0.40  
+# ✅ VOLUME FILTER REVERTED TO 80% (For High Quality Fakeout Catching)
+VOL_MULT = 0.80  
 
 RSI_LONG_MIN, RSI_LONG_MAX = 50, 75
 RSI_SHORT_MIN, RSI_SHORT_MAX = 25, 50
@@ -392,9 +391,7 @@ class APIGuard:
             self.consecutive_errors += 1
             if self.consecutive_errors >= MAX_CONSECUTIVE_ERRORS and time.time() > self.circuit_tripped_until:
                 self.circuit_tripped_until = time.time() + 900
-                notify(f"🚨 *CIRCUIT BREAKER TRIPPED!*
-Last error: `{err_detail[:120]}`
-Paused for 15 mins.")
+                notify(f"🚨 *CIRCUIT BREAKER TRIPPED!*\nLast error: `{err_detail[:120]}`\nPaused for 15 mins.")
 
     def is_circuit_open(self) -> bool:
         return time.time() < self.circuit_tripped_until
@@ -843,20 +840,15 @@ class EnterprisePositionManager:
                 db.delete_position(sym)
                 db.record_closed_trade(sym, trade.get("side", "LONG"), entry, exit_price, qty, net_pnl, reason)
                 notify(
-                    f"🔔 *Position Closed: {reason}*
-Coin: `{sym}`
-"
-                    f"Entry: `{entry}` | Exit: `{exit_price}`
-"
-                    f"💵 Net PnL: `{net_pnl:+.2f} USDT`
-"
+                    f"🔔 *Position Closed: {reason}*\nCoin: `{sym}`\n"
+                    f"Entry: `{entry}` | Exit: `{exit_price}`\n"
+                    f"💵 Net PnL: `{net_pnl:+.2f} USDT`\n"
                     f"📅 Today: `{round(db.get_today_realized_pnl()[0], 2):+.2f} USDT`"
                 )
 
             for orphan_sym, orphan_sz in exchange_positions.items():
                 if int(snapshot_time) % 300 < 25:
-                    notify(f"⚠️ *ORPHAN POSITION DETECTED*
-Exchange has `{orphan_sym}` open (Size: `{orphan_sz}`). Check CoinSwitch!")
+                    notify(f"⚠️ *ORPHAN POSITION DETECTED*\nExchange has `{orphan_sym}` open (Size: `{orphan_sz}`). Check CoinSwitch!")
 
     def execute_entry(self, signal_data: dict):
         symbol, side_signal, candle_ts, vol_ratio = signal_data["symbol"], signal_data["signal"], signal_data["candle_ts"], signal_data["vol_ratio"]
@@ -897,11 +889,9 @@ Exchange has `{orphan_sym}` open (Size: `{orphan_sz}`). Check CoinSwitch!")
             if not LIVE_TRADING_ENABLED:
                 self.processed_candles[symbol] = candle_ts
                 notify(
-                    f"🧪 *DRY RUN SIGNAL* | `{symbol}` ({side_signal})
-"
-                    f"Ref Price: `{ref_price}` | SL: `{est_stop_loss}` | TP: `{est_take_profit}`
-"
-                    f"Hack: SCALPER TRAP FADE (1:1 Target, Vol 0.40x)"
+                    f"🧪 *DRY RUN SIGNAL* | `{symbol}` ({side_signal})\n"
+                    f"Ref Price: `{ref_price}` | SL: `{est_stop_loss}` | TP: `{est_take_profit}`\n"
+                    f"Hack: SCALPER TRAP FADE (1:1 Target, Vol 0.80x)"
                 )
                 return
 
@@ -970,14 +960,9 @@ Exchange has `{orphan_sym}` open (Size: `{orphan_sz}`). Check CoinSwitch!")
             db.save_position(pos_record)
 
         notify(
-            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (LIMIT SCALPER)
-"
-            f"Coin: `{symbol}`
-Fill: `{actual_fill}` | Qty: `{quantity}`
-"
-            f"🛡️ SL: `{stop_loss}`
-🎯 TP: `{take_profit}`
-"
+            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (LIMIT SCALPER)\n"
+            f"Coin: `{symbol}`\nFill: `{actual_fill}` | Qty: `{quantity}`\n"
+            f"🛡️ SL: `{stop_loss}`\n🎯 TP: `{take_profit}`\n"
             f"Limit order executed to save fees."
         )
 
@@ -1070,11 +1055,8 @@ Fill: `{actual_fill}` | Qty: `{quantity}`
         db.record_closed_trade(symbol, t_side, entry, exit_price, qty, net_pnl, reason)
 
         notify(
-            f"🔔 *Position Closed: {reason}*
-Coin: `{symbol}`
-"
-            f"Entry: `{entry}` | Exit: `{exit_price}`
-"
+            f"🔔 *Position Closed: {reason}*\nCoin: `{symbol}`\n"
+            f"Entry: `{entry}` | Exit: `{exit_price}`\n"
             f"💵 Net PnL: `{net_pnl:+.2f} USDT`"
         )
 
@@ -1108,7 +1090,7 @@ def parallel_scanner_loop():
 
     if LIVE_TRADING_ENABLED:
         if verify_sufficient_balance():
-            notify("✅ *Bot Started: SCALPER TRAP FADE (LIMIT ORDERS) | Scan: 45s | Target: 1:1 | Vol: 0.40*")
+            notify("✅ *Bot Started: SCALPER TRAP FADE (LIMIT ORDERS) | Scan: 45s | Target: 1:1 | Vol: 0.80*")
         else:
             notify("⛔ LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
     else:
