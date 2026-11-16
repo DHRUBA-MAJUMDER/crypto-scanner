@@ -74,7 +74,10 @@ DYNAMIC_SETTINGS = {
 }
 
 BREAKOUT_LOOKBACK = 12
-VOL_MULT = 0.80  
+
+# ✅ VOLUME FILTER REDUCED TO 40% (For more frequent trade entries)
+VOL_MULT = 0.40  
+
 RSI_LONG_MIN, RSI_LONG_MAX = 50, 75
 RSI_SHORT_MIN, RSI_SHORT_MAX = 25, 50
 REQUIRE_EMA_TREND = True
@@ -260,11 +263,11 @@ class FirebaseDatabase:
     def save_position(self, pos: dict) -> bool:
         with self.db_lock:
             try:
-                r = requests.put(f"{FIREBASE_URL}/active_positions/{pos['symbol']}.json", json=pos, timeout=5)
+                r = requests.put(f"{FIREBASE_URL}/active_positions/{pos['symbol']}.json", json=pos, timeout=8)
                 if r.status_code == 200:
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Firebase save failed: {e}")
             return False
 
     def delete_position(self, symbol: str) -> bool:
@@ -412,11 +415,11 @@ def coinswitch_request(method: str, endpoint: str, payload: dict = None, track_e
     }
     try:
         if method == "GET":
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.get(url, headers=headers, timeout=12)
         elif method == "DELETE":
-            res = requests.delete(url, headers=headers, json=payload, timeout=10)
+            res = requests.delete(url, headers=headers, json=payload, timeout=12)
         else:
-            res = requests.post(url, headers=headers, json=payload, timeout=10)
+            res = requests.post(url, headers=headers, json=payload, timeout=12)
 
         if res.status_code in (200, 201):
             api_guard.record_success()
@@ -628,7 +631,6 @@ def analyze_closed_candle(symbol: str):
     if len(closed_candles) < 72:
         return None
 
-    # We evaluate immediately on the closed breakout candle
     c1_breakout = closed_candles[-1]
 
     age_sec = (now_ms - (c1_breakout["ts"] + CANDLE_MS)) / 1000.0
@@ -639,7 +641,6 @@ def analyze_closed_candle(symbol: str):
     closes = [c["close"] for c in closed_candles]
     volumes = [c["volume"] for c in closed_candles]
 
-    # Calculate indicators
     ema20 = calculate_ema(closes, 20)
     ema50 = calculate_ema(closes, 50)
     rsi = calculate_rsi(closes, 14)
@@ -660,7 +661,6 @@ def analyze_closed_candle(symbol: str):
         reject("c1_low_volume")
         return None
 
-    # 1. First, detect what the APPARENT market direction is showing to Retail Traders
     apparent_direction = None
     if c1_breakout["close"] > c1_breakout["open"] and c1_breakout["close"] > resistance + breakout_buffer:
         apparent_direction = "LONG"
@@ -671,41 +671,22 @@ def analyze_closed_candle(symbol: str):
         reject("no_breakout_c1")
         return None
 
-    # 2. Check if all traditional indicators are supporting the trap
     if apparent_direction == "LONG":
-        if REQUIRE_EMA_TREND and not (ema20 > ema50):
-            reject("long_ema_trend")
-            return None
-        if not (RSI_LONG_MIN <= rsi <= RSI_LONG_MAX):
-            reject("long_rsi")
-            return None
-        if not (macd_val > macd_sig):
-            reject("long_macd_momentum_weak")
-            return None
-        if cmf < 0.10:
-            reject("cmf_long_weak")
-            return None
-    else:  # apparent_direction == "SHORT"
-        if REQUIRE_EMA_TREND and not (ema20 < ema50):
-            reject("short_ema_trend")
-            return None
-        if not (RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX):
-            reject("short_rsi")
-            return None
-        if not (macd_val < macd_sig):
-            reject("short_macd_momentum_weak")
-            return None
-        if cmf > -0.10:
-            reject("cmf_short_weak")
-            return None
+        if REQUIRE_EMA_TREND and not (ema20 > ema50): return None
+        if not (RSI_LONG_MIN <= rsi <= RSI_LONG_MAX): return None
+        if not (macd_val > macd_sig): return None
+        if cmf < 0.10: return None
+    else: 
+        if REQUIRE_EMA_TREND and not (ema20 < ema50): return None
+        if not (RSI_SHORT_MIN <= rsi <= RSI_SHORT_MAX): return None
+        if not (macd_val < macd_sig): return None
+        if cmf > -0.10: return None
 
-    # 3. HACK - All indicators confirm the trap. We execute the EXACT OPPOSITE!
     reject("SIGNAL_FOUND")
     final_direction = "SHORT" if apparent_direction == "LONG" else "LONG"
 
     vol_ratio = c1_breakout["volume"] / avg_vol if avg_vol > 0 else 1.0
     
-    # Place logical SL slightly beyond the fakeout extreme
     logical_sl = c1_breakout["high"] if final_direction == "SHORT" else c1_breakout["low"]
 
     major_support = min(c["low"] for c in closed_candles[:-1])
@@ -894,7 +875,9 @@ class EnterprisePositionManager:
 
             est_stop_loss = format_price(base_sl, symbol)
             fee_buffer_est = ref_price * ROUND_TRIP_FEE_PCT
-            tp_multiplier = 1.5
+            
+            # ✅ TARGET 1:1 RATIO (For Ultra-Fast Profit Booking)
+            tp_multiplier = 1.0 
 
             if side_signal == "LONG":
                 math_tp = ref_price + (tp_multiplier * (ref_price - est_stop_loss)) + fee_buffer_est
@@ -908,7 +891,7 @@ class EnterprisePositionManager:
                 notify(
                     f"🧪 *DRY RUN SIGNAL* | `{symbol}` ({side_signal})\n"
                     f"Ref Price: `{ref_price}` | SL: `{est_stop_loss}` | TP: `{est_take_profit}`\n"
-                    f"Hack: FULL INDICATOR TRAP FADE (No Confirm Wait)"
+                    f"Hack: SCALPER TRAP FADE (1:1 Target, Vol 0.40x)"
                 )
                 return
 
@@ -938,16 +921,19 @@ class EnterprisePositionManager:
             if not order_id:
                 return
 
+            # ✅ ORPHAN FIX: 2.5 second sleep for sync safety
+            time.sleep(2.5)
+
             actual_fill, filled_qty = 0.0, 0.0
             FILLED_STATES = {"FILLED", "EXECUTED", "COMPLETED", "CLOSED"}
 
             for _ in range(4):
-                time.sleep(1.0)
                 info = self._get_order_info(order_id)
                 if info["avg_price"] > 0: actual_fill = info["avg_price"]
                 if info["exec_qty"] > 0: filled_qty = info["exec_qty"]
                 if info["status"] in FILLED_STATES and filled_qty > 0:
                     break
+                time.sleep(1.0)
 
             if filled_qty <= 0 or actual_fill <= 0:
                 self._safe_cancel(symbol, order_id)
@@ -972,10 +958,10 @@ class EnterprisePositionManager:
             db.save_position(pos_record)
 
         notify(
-            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (ALL-INDICATOR TRAP FADE)\n"
+            f"{'🟢 *LONG*' if side_signal == 'LONG' else '🔴 *SHORT*'} (SCALPER TRAP 1:1 RR)\n"
             f"Coin: `{symbol}`\nFill: `{actual_fill}` | Qty: `{quantity}`\n"
             f"🛡️ SL: `{stop_loss}`\n🎯 TP: `{take_profit}`\n"
-            f"No Wait confirmation execution."
+            f"Fast 1:1 exit target set."
         )
 
     def monitor_and_trail_positions(self):
@@ -1043,7 +1029,6 @@ class EnterprisePositionManager:
         time.sleep(1.5)
         pos_resp = coinswitch_request("GET", f"/trade/api/v2/futures/positions?exchange={EXCHANGE_NAME}&symbol={symbol}", track_errors=False)
         
-        # Anti-spam close retry tracking logic
         size = 0.0
         if pos_resp.get("ok"):
             p_body = pos_resp.get("body", {})
@@ -1103,7 +1088,7 @@ def parallel_scanner_loop():
 
     if LIVE_TRADING_ENABLED:
         if verify_sufficient_balance():
-            notify("✅ *Bot Started: FULL INDICATOR TRAP FADE (Reverse & No Confirm Wait) | Scan: 30s | Vol: 0.80*")
+            notify("✅ *Bot Started: SCALPER TRAP FADE | Scan: 45s | Target: 1:1 | Vol: 0.40*")
         else:
             notify("⛔ LIVE mode enabled, but wallet balance < 6.4 USDT. Waiting for deposit...")
     else:
@@ -1128,7 +1113,7 @@ def parallel_scanner_loop():
                         pass
 
             print(f"📊 Scan summary: {pop_reject_stats()}", flush=True)
-            time.sleep(30) 
+            time.sleep(45) 
         except Exception:
             time.sleep(15)
 
